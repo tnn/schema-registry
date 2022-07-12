@@ -16,6 +16,8 @@
 
 package io.confluent.kafka.serializers;
 
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
 import io.confluent.kafka.schemaregistry.avro.AvroSchema;
 import io.confluent.kafka.schemaregistry.avro.AvroSchemaProvider;
 import io.confluent.kafka.schemaregistry.client.rest.exceptions.RestClientException;
@@ -26,6 +28,7 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.ExecutionException;
 
 import org.apache.avro.Schema;
 import org.apache.avro.Schema.Type;
@@ -51,8 +54,15 @@ public abstract class AbstractKafkaAvroSerializer extends AbstractKafkaSchemaSer
   protected boolean latestCompatStrict;
   protected boolean avroReflectionAllowNull = false;
   protected boolean avroUseLogicalTypeConverters = false;
-  private final ConcurrentMap<Schema, DatumWriter<Object>> datumWriterCache =
-        new ConcurrentHashMap<>();
+  private final Cache<Schema, DatumWriter<Object>> datumWriterCache;
+
+  public AbstractKafkaAvroSerializer() {
+    // use identity (==) comparison for keys
+    datumWriterCache = CacheBuilder.newBuilder()
+            .maximumSize(1000)
+            .weakKeys()
+            .build();
+  }
 
   protected void configure(KafkaAvroSerializerConfig config) {
     configureClientProperties(config, new AvroSchemaProvider());
@@ -164,10 +174,57 @@ public abstract class AbstractKafkaAvroSerializer extends AbstractKafkaSchemaSer
     BinaryEncoder encoder = encoderFactory.directBinaryEncoder(out, null);
 
     DatumWriter<Object> writer;
-    writer = datumWriterCache.computeIfAbsent(rawSchema,
-      cacheKey -> (DatumWriter<Object>) getDatumWriter(value, cacheKey)
-    );
+    try {
+      writer = datumWriterCache.get(rawSchema, () -> (DatumWriter<Object>) getDatumWriter(value, rawSchema)
+      );
+    } catch (ExecutionException e) {
+      throw new RuntimeException(e);
+    }
     writer.write(value, encoder);
     encoder.flush();
+  }
+
+  static class IdentityPair<K, V> {
+    private final K key;
+    private final V value;
+
+    public IdentityPair(K key, V value) {
+      this.key = key;
+      this.value = value;
+    }
+
+    public K getKey() {
+      return key;
+    }
+
+    public V getValue() {
+      return value;
+    }
+
+    @Override
+    public boolean equals(Object o) {
+      if (this == o) {
+        return true;
+      }
+      if (o == null || getClass() != o.getClass()) {
+        return false;
+      }
+      IdentityPair<?, ?> pair = (IdentityPair<?, ?>) o;
+      // Only perform identity check
+      return key == pair.key && value == pair.value;
+    }
+
+    @Override
+    public int hashCode() {
+      return System.identityHashCode(key) + System.identityHashCode(value);
+    }
+
+    @Override
+    public String toString() {
+      return "IdentityPair{"
+              + "key=" + key
+              + ", value=" + value
+              + '}';
+    }
   }
 }

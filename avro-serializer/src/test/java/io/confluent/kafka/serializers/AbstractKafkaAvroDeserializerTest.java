@@ -5,6 +5,7 @@ import static org.hamcrest.CoreMatchers.equalTo;
 import static org.hamcrest.CoreMatchers.sameInstance;
 import static org.junit.Assert.*;
 
+import com.google.common.cache.Cache;
 import io.confluent.kafka.schemaregistry.avro.AvroSchema;
 import io.confluent.kafka.schemaregistry.client.MockSchemaRegistryClient;
 import io.confluent.kafka.schemaregistry.client.SchemaRegistryClient;
@@ -164,7 +165,7 @@ public class AbstractKafkaAvroDeserializerTest {
 
     Field datumWriterCacheField = AbstractKafkaAvroSerializer.class.getDeclaredField("datumWriterCache");
     datumWriterCacheField.setAccessible(true);
-    Map<Schema, DatumWriter<Object>> datumWriterCache = (Map<Schema, DatumWriter<Object>>) datumWriterCacheField.get(cachedSerializer);
+    Cache<Schema, DatumWriter<Object>> datumWriterCache = (Cache<Schema, DatumWriter<Object>>) datumWriterCacheField.get(cachedSerializer);
     assertEquals(1, datumWriterCache.size());
   }
 
