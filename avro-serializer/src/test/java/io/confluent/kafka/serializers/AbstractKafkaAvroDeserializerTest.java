@@ -3,9 +3,9 @@ package io.confluent.kafka.serializers;
 import static java.util.Collections.singletonMap;
 import static org.hamcrest.CoreMatchers.equalTo;
 import static org.hamcrest.CoreMatchers.sameInstance;
-import static org.junit.Assert.assertThat;
-import static org.junit.Assert.fail;
+import static org.junit.Assert.*;
 
+import com.google.common.cache.Cache;
 import io.confluent.kafka.schemaregistry.ParsedSchema;
 import io.confluent.kafka.schemaregistry.avro.AvroSchema;
 import io.confluent.kafka.schemaregistry.client.MockSchemaRegistryClient;
@@ -19,12 +19,17 @@ import io.confluent.kafka.serializers.subject.strategy.SubjectNameStrategy;
 import java.io.IOException;
 import java.lang.reflect.Field;
 import java.util.Map;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ForkJoinPool;
+import java.util.concurrent.ForkJoinTask;
+import java.util.stream.LongStream;
 
 import com.google.common.collect.ImmutableMap;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericData;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.generic.IndexedRecord;
+import org.apache.avro.io.DatumWriter;
 import org.apache.kafka.common.config.ConfigException;
 import org.junit.Assert;
 import org.junit.Before;
@@ -35,6 +40,10 @@ public class AbstractKafkaAvroDeserializerTest {
   private SchemaRegistryClient schemaRegistry;
   private KafkaAvroSerializer avroSerializer;
   private Deserializer deserializer;
+
+  private static final String USER_SCHEMA = "{\"namespace\": \"example.avro\", \"type\": \"record\", " +
+          "\"name\": \"User\"," +
+          "\"fields\": [{\"name\": \"name\", \"type\": \"string\"}]}";
 
   @Before
   public void setUp() {
@@ -52,11 +61,10 @@ public class AbstractKafkaAvroDeserializerTest {
   }
 
   private IndexedRecord createAvroRecord() {
-    String userSchema = "{\"namespace\": \"example.avro\", \"type\": \"record\", " +
-        "\"name\": \"User\"," +
-        "\"fields\": [{\"name\": \"name\", \"type\": \"string\"}]}";
     Schema.Parser parser = new Schema.Parser();
-    Schema schema = parser.parse(userSchema);
+    return createAvroRecord(parser.parse(USER_SCHEMA));
+  }
+   private IndexedRecord createAvroRecord(Schema schema) {
     GenericRecord avroRecord = new GenericData.Record(schema);
     avroRecord.put("name", "testUser");
     return avroRecord;
@@ -140,6 +148,58 @@ public class AbstractKafkaAvroDeserializerTest {
   }
 
   @Test
+  public void datum_writer_cache_should_not_duplicate_equal_schemas() throws ExecutionException, InterruptedException, NoSuchFieldException, IllegalAccessException, RestClientException, IOException {
+    KafkaAvroSerializer cachedSerializer = new KafkaAvroSerializer(schemaRegistry, defaultConfigs);
+    ForkJoinPool customThreadPool = new ForkJoinPool(8);
+    Schema.Parser parser = new Schema.Parser();
+    Schema schema = parser.parse(USER_SCHEMA);
+
+    schemaRegistry.register("topic", new AvroSchema(schema));
+
+    ForkJoinTask<Long> results = customThreadPool.submit(() -> LongStream
+            .range(0, 2048).parallel().map(i -> {
+              IndexedRecord avroRecord = createAvroRecord(schema);
+              cachedSerializer.serialize("topic", avroRecord);
+              return 1L;
+            })
+            .reduce(0L, Long::sum)
+    );
+    results.get();
+
+    Field datumWriterCacheField = AbstractKafkaAvroSerializer.class.getDeclaredField("datumWriterCache");
+    datumWriterCacheField.setAccessible(true);
+    Cache<Schema, DatumWriter<Object>> datumWriterCache = (Cache<Schema, DatumWriter<Object>>) datumWriterCacheField.get(cachedSerializer);
+    assertEquals(1, datumWriterCache.size());
+  }
+
+  @Test
+  public void datum_writer_cache_should_duplicate_identical_schemas() throws ExecutionException, InterruptedException, NoSuchFieldException, IllegalAccessException, RestClientException, IOException {
+    KafkaAvroSerializer cachedSerializer = new KafkaAvroSerializer(schemaRegistry, defaultConfigs);
+    ForkJoinPool customThreadPool = new ForkJoinPool(8);
+    Schema.Parser parser = new Schema.Parser();
+    Schema schema = parser.parse(USER_SCHEMA);
+
+    schemaRegistry.register("topic", new AvroSchema(schema));
+
+    ForkJoinTask<Long> results = customThreadPool.submit(() -> LongStream
+            .range(0, 10).parallel().map(i -> {
+              Schema.Parser recordParser = new Schema.Parser();
+              Schema recordSchema = recordParser.parse(USER_SCHEMA);
+              IndexedRecord avroRecord = createAvroRecord(recordSchema);
+              cachedSerializer.serialize("topic", avroRecord);
+              return 1L;
+            })
+            .reduce(0L, Long::sum)
+    );
+    results.get();
+
+    Field datumWriterCacheField = AbstractKafkaAvroSerializer.class.getDeclaredField("datumWriterCache");
+    datumWriterCacheField.setAccessible(true);
+    Cache<Schema, DatumWriter<Object>> datumWriterCache = (Cache<Schema, DatumWriter<Object>>) datumWriterCacheField.get(cachedSerializer);
+    assertEquals(10, datumWriterCache.size());
+  }
+
+  @Test
   public void testHashCodeNotReset() throws NoSuchFieldException, IllegalAccessException {
     IndexedRecord avroRecord = createAvroRecord();
     byte[] bytes = avroSerializer.serialize("topic", avroRecord);
@@ -179,7 +239,7 @@ public class AbstractKafkaAvroDeserializerTest {
         );
         fail();
     } catch (final ConfigException e) {
-        Assert.assertEquals(
+        assertEquals(
                 "Only one mock scope is permitted for 'schema.registry.url'. Got: [mock://asdf, mock://qwer]",
                 e.getMessage()
         );
@@ -198,7 +258,7 @@ public class AbstractKafkaAvroDeserializerTest {
         );
         fail();
     } catch (final ConfigException e) {
-        Assert.assertEquals(
+        assertEquals(
                 "Cannot mix mock and real urls for 'schema.registry.url'. Got: [mock://asdf, http://qwer]",
                 e.getMessage()
         );
@@ -211,7 +271,7 @@ public class AbstractKafkaAvroDeserializerTest {
         );
         fail();
     } catch (final ConfigException e) {
-        Assert.assertEquals(
+        assertEquals(
                 "Cannot mix mock and real urls for 'schema.registry.url'. Got: [http://qwer, mock://asdf]",
                 e.getMessage()
         );
